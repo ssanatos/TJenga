@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>글자 젠가</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#1d2433;color:#fff;font-family:'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif}
+canvas{display:block;touch-action:none}
+#ui{position:fixed;left:0;right:0;top:0;display:flex;flex-wrap:wrap;gap:8px;padding:10px;background:rgba(0,0,0,.4);align-items:center;font-size:14px}
+#ui input[type=text]{flex:1 1 180px;min-width:120px;padding:9px 10px;font-size:16px;border-radius:8px;border:0}
+#ui label{display:flex;align-items:center;gap:4px;cursor:pointer}
+button{padding:9px 14px;font-size:14px;font-weight:700;border:0;border-radius:8px;background:#e8a95b;color:#3a2410;cursor:pointer}
+button.sub{background:#556;color:#fff}
+#hud{position:fixed;right:12px;bottom:10px;text-align:right;font-size:15px;line-height:1.5;text-shadow:0 1px 3px #000}
+#hint{position:fixed;left:12px;bottom:10px;font-size:13px;opacity:.7}
+#msg{position:fixed;left:50%;top:38%;transform:translateX(-50%);font-size:30px;font-weight:900;opacity:0;transition:opacity .4s;pointer-events:none;text-shadow:0 2px 8px #000;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <input id="txt" type="text" maxlength="20" placeholder="문구 입력 (예: 아테네학당)">
+  <label><input type="radio" name="m" value="engrave" checked>글자 새김</label>
+  <label><input type="radio" name="m" value="shape">글자 모양</label>
+  <button id="add">블록 만들기</button>
+  <button id="rot" class="sub">회전(R)</button>
+  <button id="reset" class="sub">초기화</button>
+</div>
+<div id="hint">블록을 끌어서 쌓으세요 · R키/회전 버튼: 90° 회전</div>
+<div id="hud"></div>
+<div id="msg"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+const {Engine,Bodies,Body,Composite,Mouse,MouseConstraint}=Matter;
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const engine=Engine.create({enableSleeping:true,positionIterations:20,velocityIterations:14,constraintIterations:4});
+engine.gravity.y=1.5;
+const world=engine.world;
+const TW=860;
+const table=Bodies.rectangle(0,15,TW,30,{isStatic:true,friction:1,frictionStatic:1,collisionFilter:{category:1}});
+Composite.add(world,table);
+const mouse=Mouse.create(cv);
+const mc=MouseConstraint.create(engine,{mouse,collisionFilter:{category:1,mask:4,group:0},constraint:{stiffness:.1,damping:.35,render:{visible:false}}});
+Composite.add(world,mc);
+
+let W,H,GY,s=1,blocks=[],fallen=0,side=1,best=0,msgT=0;
+try{best=+localStorage.getItem('jengaBest')||0}catch(e){}
+const COLORS=['#e0b07a','#d9a066','#cf9a62','#c98a4b','#e6bd8a','#bf8a56'];
+const fontStr=fs=>`900 ${fs}px 'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif`;
+const mctx=document.createElement('canvas').getContext('2d');
+
+function resize(){W=cv.width=innerWidth;H=cv.height=innerHeight;GY=H-90}
+addEventListener('resize',resize);resize();
+
+function opts(){return{friction:.6,frictionStatic:.9,restitution:.02,frictionAir:.012,density:.002,collisionFilter:{category:4}}}
+
+function makeBlock(text,mode){
+  text=text.trim();if(!text)return;
+  const color=COLORS[blocks.length%COLORS.length];
+  const x=side*300;side=-side;const y=-120;
+  let b,info;
+  if(mode==='shape'){
+    let fs=70;mctx.font=fontStr(fs);
+    const w=mctx.measureText(text).width;
+    if(w>360){fs=Math.max(30,Math.floor(fs*360/w))}
+    const r=shapeBody(text,fs,x,y);
+    if(r){b=r.body;info={mode,text,fs,color,off:r.off}}
+  }
+  if(!b){
+    let fs=26;mctx.font=fontStr(fs);
+    let w=mctx.measureText(text).width;
+    if(w>320){fs=Math.max(12,Math.floor(fs*320/w));mctx.font=fontStr(fs);w=mctx.measureText(text).width}
+    const bw=Math.ceil(w)+30,bh=fs+28;
+    b=Bodies.rectangle(x,y,bw,bh,opts());
+    info={mode:'engrave',text,fs,color,w:bw,h:bh};
+  }
+  b.info=info;blocks.push(b);Composite.add(world,b);
+}
+
+function shapeBody(text,fs,x,y){
+  const f=fontStr(fs),c=document.createElement('canvas'),m=c.getContext('2d');
+  m.font=f;
+  const tw=Math.ceil(m.measureText(text).width)+8,th=Math.ceil(fs*1.3);
+  c.width=tw;c.height=th;
+  m.font=f;m.textAlign='center';m.textBaseline='middle';m.fillText(text,tw/2,th/2);
+  const d=m.getImageData(0,0,tw,th).data,cell=Math.max(4,Math.round(fs/10));
+  const cols=Math.ceil(tw/cell),rows=Math.ceil(th/cell);
+  const solid=(cx,cy)=>{let n=0;
+    for(let yy=cy*cell;yy<Math.min(th,(cy+1)*cell);yy++)
+      for(let xx=cx*cell;xx<Math.min(tw,(cx+1)*cell);xx++)
+        if(d[(yy*tw+xx)*4+3]>128)n++;
+    return n>=cell*cell*.45};
+  const parts=[],o=opts();let prev=[];
+  const emit=(c0,q,r0,r1)=>{const wl=(q-c0)*cell,hl=(r1-r0)*cell;parts.push(Bodies.rectangle(c0*cell+wl/2-tw/2,r0*cell+hl/2-th/2,wl,hl,o))};
+  for(let r=0;r<=rows;r++){
+    const cur=[];
+    if(r<rows){let c0=-1;for(let q=0;q<=cols;q++){const on=q<cols&&solid(q,r);if(on&&c0<0)c0=q;if(!on&&c0>=0){cur.push({c0,q,r0:r});c0=-1}}}
+    prev.forEach(p=>{const m2=cur.find(x=>x.c0===p.c0&&x.q===p.q);if(m2)m2.r0=p.r0;else emit(p.c0,p.q,p.r0,r)});
+    prev=cur;
+  }
+  if(!parts.length)return null;
+  const body=Body.create(Object.assign({parts},o));
+  const off={x:-body.position.x,y:-body.position.y};
+  Body.setPosition(body,{x,y});
+  return{body,off};
+}
+
+function drawBlock(b){
+  const i=b.info;
+  ctx.save();ctx.translate(b.position.x,b.position.y);ctx.rotate(b.angle);
+  if(i.mode==='engrave'){
+    const w=i.w,h=i.h;
+    ctx.fillStyle=i.color;ctx.strokeStyle='#7a4f27';ctx.lineWidth=2.5;
+    ctx.beginPath();ctx.roundRect(-w/2,-h/2,w,h,6);ctx.fill();ctx.stroke();
+    ctx.strokeStyle='rgba(120,75,35,.25)';ctx.lineWidth=1;
+    for(let k=1;k<4;k++){const yy=-h/2+h*k/4;ctx.beginPath();ctx.moveTo(-w/2+4,yy);ctx.lineTo(w/2-4,yy+(k%2?1.5:-1.5));ctx.stroke()}
+    ctx.font=fontStr(i.fs);ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillStyle='rgba(255,236,200,.7)';ctx.fillText(i.text,1,1.5);
+    ctx.fillStyle='#4a2c12';ctx.fillText(i.text,0,0);
+  }else{
+    ctx.translate(i.off.x,i.off.y);
+    ctx.font=fontStr(i.fs);ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.lineJoin='round';
+    ctx.strokeStyle='#5a3718';ctx.lineWidth=Math.max(3,i.fs/16);ctx.strokeText(i.text,0,0);
+    ctx.fillStyle=i.color;ctx.fillText(i.text,0,0);
+  }
+  ctx.restore();
+}
+
+function draw(){
+  const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#2b3a58');g.addColorStop(1,'#141a28');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  ctx.save();ctx.translate(W/2,GY);ctx.scale(s,s);
+  ctx.fillStyle='#6b4a30';ctx.fillRect(-TW/2,0,TW,30);
+  ctx.fillStyle='#8a6340';ctx.fillRect(-TW/2,0,TW,6);
+  ctx.fillStyle='#4a3220';ctx.fillRect(-TW/2+30,30,26,400);ctx.fillRect(TW/2-56,30,26,400);
+  blocks.forEach(drawBlock);
+  ctx.restore();
+}
+
+function say(t){const m=document.getElementById('msg');m.textContent=t;m.style.opacity=1;clearTimeout(msgT);msgT=setTimeout(()=>m.style.opacity=0,1400)}
+
+let last=0,acc=0;
+function step(now){
+  now=now||performance.now();acc+=Math.min(50,now-(last||now));last=now;
+  const hb=mc.body;
+  if(hb){
+    const e=hb.angle-Math.round(hb.angle/(Math.PI/2))*Math.PI/2;
+    Body.setAngularVelocity(hb,-e*.2);
+    if(hb.speed>14)Body.setVelocity(hb,{x:hb.velocity.x*14/hb.speed,y:hb.velocity.y*14/hb.speed});
+  }
+  while(acc>=1000/120){Engine.update(engine,1000/120);acc-=1000/120}
+  let top=0;
+  for(let k=blocks.length-1;k>=0;k--){
+    const b=blocks[k];
+    if(b.position.y>300&&!b.gone){b.gone=true;fallen++;say('블록이 떨어졌다!')}
+    if(b.position.y>700){Composite.remove(world,b);blocks.splice(k,1);continue}
+    if(!b.gone&&b!==mc.body&&b.speed<.3&&b.position.y<20)top=Math.max(top,-b.bounds.min.y);
+  }
+  const cm=Math.round(top/4);
+  if(cm>best){best=cm;try{localStorage.setItem('jengaBest',best)}catch(e){}}
+  const target=Math.max(.25,Math.min(1,(H-190)/(top+200),W/900));
+  s+=(target-s)*.05;
+  Mouse.setScale(mouse,{x:1/s,y:1/s});
+  Mouse.setOffset(mouse,{x:-W/(2*s),y:-GY/s});
+  document.getElementById('hud').innerHTML=`블록 ${blocks.length}개 · 높이 ${cm}cm<br>최고 기록 ${best}cm · 떨어진 블록 ${fallen}`;
+  draw();
+  requestAnimationFrame(step);
+}
+
+function add(){
+  const t=document.getElementById('txt');
+  makeBlock(t.value,document.querySelector('input[name=m]:checked').value);
+  t.value='';t.focus();
+}
+document.getElementById('add').onclick=add;
+document.getElementById('txt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing)add()});
+document.getElementById('reset').onclick=()=>{blocks.forEach(b=>Composite.remove(world,b));blocks=[];fallen=0;side=1};
+
+Matter.Events.on(mc,'enddrag',e=>{const b=e.body;Body.setVelocity(b,{x:b.velocity.x*.3,y:Math.min(b.velocity.y*.3,3)});Body.setAngularVelocity(b,0)});
+function rot(){
+  const b=mc.body||blocks[blocks.length-1];if(!b)return;
+  Matter.Sleeping.set(b,false);
+  if(!mc.body){const d=Math.max(b.bounds.max.x-b.bounds.min.x,b.bounds.max.y-b.bounds.min.y)/2;Body.setPosition(b,{x:b.position.x,y:b.position.y-d})}
+  Body.setAngle(b,b.angle+Math.PI/2);
+}
+document.getElementById('rot').onclick=rot;
+addEventListener('keydown',e=>{if(e.target.tagName!=='INPUT'&&(e.key==='r'||e.key==='R'))rot()});
+makeBlock('아테네학당','engrave');
+makeBlock('아리스토텔레스','shape');
+step();
+</script>
+</body>
+</html>
